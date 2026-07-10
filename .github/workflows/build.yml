@@ -1,49 +1,61 @@
 name: Build new-api
 
-on:
-  workflow_dispatch:
+'on': workflow_dispatch
 
 permissions:
   contents: write
+  actions: write
+
+env:
+  UPSTREAM_REPO: QuantumNous/new-api
 
 jobs:
   test:
     runs-on: ubuntu-latest
     name: Build new-api
-
     steps:
-      - uses: actions/checkout@v4
-
+    
+      - uses: actions/checkout@v7
+    
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
 
+      - name: Resolve upstream tag
+        id: upstream
+        run: |
+          tag="$(curl -fsSL "https://api.github.com/repos/${UPSTREAM_REPO}/tags?per_page=1" | python3 -c "import json,sys; data=json.load(sys.stdin); print(data[0]['name'])")"
+          if [ -z "$tag" ]; then
+            echo "::error::Failed to resolve latest upstream tag"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Resolved upstream tag: $tag"
+
       - name: Clone Repo
         run: |
-          export LATEST_APP=$(wget -qO- https://api.github.com/repos/QuantumNous/new-api/tags | gawk -F '["v]' '/name/{print "v"$5;exit}')
-          echo "Latest new-api tag: $LATEST_APP"
-          git clone -b $LATEST_APP https://github.com/QuantumNous/new-api
+          git clone --depth 1 --branch "${{ steps.upstream.outputs.tag }}" "https://github.com/${UPSTREAM_REPO}.git" new-api
 
-      - name: Build Frontend
+      - name: Build Frontend (default)
+        env:
+          CI: ""
+          NODE_OPTIONS: "--max-old-space-size=4096"
+        run: |
+          cd new-api/web
+          bun install --frozen-lockfile
+          cd default
+          DISABLE_ESLINT_PLUGIN='true' VITE_REACT_APP_VERSION="${{ steps.upstream.outputs.tag }}" bun run build
+          cd ../..
+
+      - name: Build Frontend (classic)
         env:
           CI: ""
         run: |
-          cd new-api
-
-          VERSION=$(git describe --tags --always)
-          echo "Build frontend version: $VERSION"
-
-          echo "Building default frontend..."
-          cd web/default
-          bun install
-          DISABLE_ESLINT_PLUGIN='true' VITE_REACT_APP_VERSION=$VERSION bun run build
-          cd ../..
-
-          echo "Building classic frontend..."
-          cd web/classic
-          bun install
-          DISABLE_ESLINT_PLUGIN='true' VITE_REACT_APP_VERSION=$VERSION bun run build
+          cd new-api/web
+          bun install --filter ./classic --frozen-lockfile
+          cd classic
+          VITE_REACT_APP_VERSION="${{ steps.upstream.outputs.tag }}" bun run build
           cd ../..
 
       - name: Build Backend
@@ -53,43 +65,33 @@ jobs:
           release: 13.2
           prepare: |
             pkg install -y jq wget curl git gcc bash gawk gsed
-            wget https://dl.google.com/go/go1.23.4.freebsd-amd64.tar.gz
-            tar -C /usr/local -xzf go1.23.4.freebsd-amd64.tar.gz
-            rm go1.23.4.freebsd-amd64.tar.gz
+            wget https://dl.google.com/go/go1.25.6.freebsd-amd64.tar.gz && tar -C /usr/local -xzf go1.25.6.freebsd-amd64.tar.gz && rm go1.25.6.freebsd-amd64.tar.gz
             ln -s /usr/local/go/bin/go /usr/local/bin/go
+          # curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          # echo '. $HOME/.cargo/env' >> ~/.bashrc
+          # . "$HOME/.cargo/env"
           run: |
             git config --global --add safe.directory /home/runner/work/new-api-freebsd/new-api-freebsd/new-api
-
             cd new-api
-
-            VERSION=$(git describe --tags --always)
-            echo "Build backend version: $VERSION"
-
             go mod download
-
-            go build -ldflags "-s -w -X 'github.com/QuantumNous/new-api/common.Version=$VERSION' -extldflags '-static'" -o new-api
+            go build -ldflags "-s -w -X 'github.com/QuantumNous/new-api/common.Version=${{ steps.upstream.outputs.tag }}' -extldflags '-static'" -o new-api
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: new-api-freebsd
           path: |
-            new-api/new-api
-
-      - name: Generate release tag
-        id: tag
-        run: |
-          echo "release_tag=$(wget -qO- https://api.github.com/repos/QuantumNous/new-api/tags | gawk -F '["v]' '/name/{print "v"$5;exit}')" >> $GITHUB_OUTPUT
-
+              new-api/new-api
+  
       - name: Create release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: ${{ steps.tag.outputs.release_tag }}
+          tag_name: ${{ steps.upstream.outputs.tag }}
           files: |
-            new-api/new-api
-
+                new-api/new-api
+              
       - name: Delete workflow runs
         uses: Mattraks/delete-workflow-runs@v2
         with:
